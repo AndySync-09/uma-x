@@ -1,0 +1,199 @@
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index b30b4cb38..1309e30af 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -18,11 +18,183 @@
+ #include <stdarg.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <stdint.h>
+ #include <string.h>
+ #include <string>
+ #include <vector>
+ #include <algorithm>
+ 
++#include <atomic>
++
++static std::atomic<unsigned long long> umax_trace_seq{0};
++
++static FILE * umax_trace_file() {
++    static FILE * file = nullptr;
++    static bool initialized = false;
++
++    if (!initialized) {
++        initialized = true;
++        const char * path = getenv("UMAX_TRACE");
++        if (path != nullptr && path[0] != '\0') {
++            file = fopen(path, "a");
++        }
++    }
++
++    return file;
++}
++
++static void umax_json_string(FILE * file, const char * value) {
++    fputc('"', file);
++
++    if (value != nullptr) {
++        for (const unsigned char * p = (const unsigned char *) value; *p; ++p) {
++            switch (*p) {
++                case '"':  fputs("\\\"", file); break;
++                case '\\': fputs("\\\\", file); break;
++                case '\b': fputs("\\b",  file); break;
++                case '\f': fputs("\\f",  file); break;
++                case '\n': fputs("\\n",  file); break;
++                case '\r': fputs("\\r",  file); break;
++                case '\t': fputs("\\t",  file); break;
++                default:
++                    if (*p < 0x20) {
++                        fprintf(file, "\\u%04x", (unsigned int) *p);
++                    } else {
++                        fputc(*p, file);
++                    }
++            }
++        }
++    }
++
++    fputc('"', file);
++}
++
++static void umax_trace_tensor_residency(
++        FILE * file,
++        const struct ggml_tensor * tensor) {
++    if (tensor->buffer != nullptr) {
++        void * base = ggml_backend_buffer_get_base(tensor->buffer);
++
++        fputs(",\"buffer\":", file);
++        umax_json_string(file, ggml_backend_buffer_name(tensor->buffer));
++
++        fputs(",\"buffer_type\":", file);
++        umax_json_string(
++            file,
++            ggml_backend_buft_name(
++                ggml_backend_buffer_get_type(tensor->buffer)));
++
++        fprintf(
++            file,
++            ",\"buffer_size\":%zu",
++            ggml_backend_buffer_get_size(tensor->buffer));
++
++        if (tensor->data != nullptr && base != nullptr) {
++            fprintf(
++                file,
++                ",\"buffer_offset\":%llu",
++                (unsigned long long) (
++                    (uintptr_t) tensor->data -
++                    (uintptr_t) base));
++        } else {
++            fputs(",\"buffer_offset\":null", file);
++        }
++    } else {
++        fputs(
++            ",\"buffer\":null,\"buffer_type\":null,"
++            "\"buffer_size\":null,\"buffer_offset\":null",
++            file);
++    }
++
++    fputs(",\"data_id\":\"", file);
++    fprintf(file, "%p", tensor->data);
++    fputc('"', file);
++
++    if (tensor->view_src != nullptr) {
++        fputs(",\"view_src_id\":\"", file);
++        fprintf(file, "%p", (const void *) tensor->view_src);
++        fputc('"', file);
++        fprintf(file, ",\"view_offs\":%zu", tensor->view_offs);
++    } else {
++        fputs(",\"view_src_id\":null,\"view_offs\":0", file);
++    }
++}
++
++static void umax_trace_node(
++        ggml_backend_t backend,
++        const struct ggml_tensor * tensor,
++        int split_index,
++        int node_index) {
++    FILE * file = umax_trace_file();
++    if (file == nullptr || tensor == nullptr) {
++        return;
++    }
++
++    const unsigned long long seq =
++        umax_trace_seq.fetch_add(1, std::memory_order_relaxed);
++
++    fprintf(file,
++        "{\"v\":2,\"event\":\"node\",\"seq\":%llu,\"split\":%d,\"node\":%d,"
++        "\"backend\":",
++        seq, split_index, node_index);
++
++    umax_json_string(file, ggml_backend_name(backend));
++
++    fputs(",\"tensor_id\":\"", file);
++    fprintf(file, "%p", (const void *) tensor);
++    fputs("\",\"name\":", file);
++    umax_json_string(file, tensor->name);
++
++    fputs(",\"op\":", file);
++    umax_json_string(file, ggml_op_name(tensor->op));
++
++    fputs(",\"type\":", file);
++    umax_json_string(file, ggml_type_name(tensor->type));
++
++    fprintf(file,
++        ",\"bytes\":%zu,\"ne\":[%lld,%lld,%lld,%lld]",
++        ggml_nbytes(tensor),
++        (long long) tensor->ne[0],
++        (long long) tensor->ne[1],
++        (long long) tensor->ne[2],
++        (long long) tensor->ne[3]);
++
++    umax_trace_tensor_residency(file, tensor);
++
++    fputs(",\"sources\":[", file);
++
++    bool first = true;
++
++    for (int i = 0; i < GGML_MAX_SRC; ++i) {
++        const struct ggml_tensor * src = tensor->src[i];
++        if (src == nullptr) {
++            continue;
++        }
++
++        if (!first) {
++            fputc(',', file);
++        }
++        first = false;
++
++        fputs("{\"id\":\"", file);
++        fprintf(file, "%p", (const void *) src);
++        fputs("\",\"name\":", file);
++        umax_json_string(file, src->name);
++
++        fputs(",\"type\":", file);
++        umax_json_string(file, ggml_type_name(src->type));
++
++        fprintf(file, ",\"bytes\":%zu", ggml_nbytes(src));
++
++        umax_trace_tensor_residency(file, src);
++
++        fputc('}', file);
++    }
++
++    fputs("]}\n", file);
++    fflush(file);
++}
++
+ #ifdef __APPLE__
+ #include <sys/types.h>
+ #include <sys/sysctl.h>
+@@ -1398,6 +1570,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+         }
+ 
+         if (!sched->callback_eval) {
++            for (int j = 0; j < split->graph.n_nodes; ++j) {
++                umax_trace_node(split_backend, split->graph.nodes[j], i, j);
++            }
++
+             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
+             if (ec != GGML_STATUS_SUCCESS) {
+                 return ec;
