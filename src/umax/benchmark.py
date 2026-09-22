@@ -4,12 +4,16 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
 
 class BenchmarkError(RuntimeError):
     pass
+
+
+_WINDOWS_ACCESS_VIOLATION_CODES = {3221225477, -1073741819}
 
 
 def _extract_json(stdout: str) -> list[dict[str, Any]]:
@@ -29,6 +33,25 @@ def _extract_json(stdout: str) -> list[dict[str, Any]]:
     if not isinstance(parsed, list):
         raise BenchmarkError("unexpected llama-bench JSON shape")
     return parsed
+
+
+def _has_complete_benchmark_rows(
+    rows: list[dict[str, Any]],
+    prompt_tokens: int,
+    gen_tokens: int,
+) -> bool:
+    has_prompt = prompt_tokens <= 0
+    has_generation = gen_tokens <= 0
+
+    for row in rows:
+        n_prompt = int(row.get("n_prompt", 0) or 0)
+        n_gen = int(row.get("n_gen", 0) or 0)
+        if n_prompt > 0 and n_gen == 0 and "avg_ts" in row:
+            has_prompt = True
+        if n_prompt == 0 and n_gen > 0 and "avg_ts" in row:
+            has_generation = True
+
+    return has_prompt and has_generation
 
 
 def run_llama_bench(
@@ -76,15 +99,45 @@ def run_llama_bench(
         stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
         stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
 
-    if proc.returncode != 0:
+    rows: list[dict[str, Any]] | None = None
+    parse_error: BenchmarkError | None = None
+    try:
+        rows = _extract_json(stdout)
+    except BenchmarkError as exc:
+        parse_error = exc
+
+    tolerated_teardown = (
+        sys.platform == "win32"
+        and proc.returncode in _WINDOWS_ACCESS_VIOLATION_CODES
+        and rows is not None
+        and _has_complete_benchmark_rows(rows, prompt_tokens, gen_tokens)
+    )
+
+    if proc.returncode != 0 and not tolerated_teardown:
+        detail = stderr.strip()
+        if parse_error is not None:
+            detail = f"{detail}\nJSON: {parse_error}".strip()
         raise BenchmarkError(
-            f"llama-bench failed with exit code {proc.returncode}\n{stderr.strip()}"
+            f"llama-bench failed with exit code {proc.returncode}\n{detail}"
+        )
+
+    if rows is None:
+        assert parse_error is not None
+        raise parse_error
+
+    teardown_warning = None
+    if tolerated_teardown:
+        teardown_warning = (
+            "llama-bench completed and emitted valid benchmark JSON, then the "
+            "Windows SYCL runtime exited with access violation 0xC0000005 during teardown"
         )
 
     return {
         "command": command,
-        "rows": _extract_json(stdout),
+        "rows": rows,
         "stderr": stderr.strip(),
+        "process_exit_code": proc.returncode,
+        "teardown_warning": teardown_warning,
     }
 
 
