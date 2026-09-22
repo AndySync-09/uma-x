@@ -61,6 +61,28 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result["process_exit_code"], 0)
         self.assertIsNone(result["teardown_warning"])
 
+    def test_run_llama_bench_forwards_environment(self):
+        payload = [
+            {"n_prompt": 16, "n_gen": 0, "avg_ts": 100.0},
+            {"n_prompt": 0, "n_gen": 1, "avg_ts": 20.0},
+        ]
+        expected_env = {"UMAX_TRACE": "trace.jsonl"}
+
+        def fake_run(command, **kwargs):
+            self.assertEqual(kwargs["env"], expected_env)
+            kwargs["stdout"].write("\n".join(json.dumps(row) for row in payload))
+            return SimpleNamespace(returncode=0)
+
+        with patch("umax.benchmark.subprocess.run", side_effect=fake_run):
+            run_llama_bench(
+                "llama-bench",
+                "model.gguf",
+                prompt_tokens=16,
+                gen_tokens=1,
+                repetitions=1,
+                env=expected_env,
+            )
+
     def test_windows_sycl_teardown_access_violation_is_tolerated_after_complete_jsonl(self):
         payload = [
             {"n_prompt": 512, "n_gen": 0, "avg_ts": 1000.0},

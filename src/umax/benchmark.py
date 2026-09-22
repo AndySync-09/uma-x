@@ -68,6 +68,7 @@ def run_llama_bench(
     gen_tokens: int,
     repetitions: int,
     extra_args: list[str] | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     command = [
         llama_bench,
@@ -102,6 +103,7 @@ def run_llama_bench(
                 stdout=stdout_file,
                 stderr=stderr_file,
                 text=True,
+                env=env,
             )
 
         stdout = stdout_path.read_text(encoding="utf-8", errors="replace")

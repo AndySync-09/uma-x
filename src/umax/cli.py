@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from .benchmark import BenchmarkError, build_report, run_llama_bench
 from .hardware import resolve_binary, snapshot
 from .planner import choose_plan
 from .profile import ProfileStore, model_fingerprint
+from .trace import analyze_trace, load_trace
 
 
 def _bytes_gib(value: int) -> str:
@@ -141,6 +143,82 @@ def _bench(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _trace(args: argparse.Namespace) -> int:
+    model = _require_model(args.model)
+    llama_bench = resolve_binary("llama-bench", args.llama_bin_dir)
+    if not llama_bench:
+        raise SystemExit(
+            "llama-bench not found; pass --llama-bin-dir or add it to PATH"
+        )
+
+    hw = snapshot(args.llama_bin_dir)
+    plan = choose_plan(hw, model.stat().st_size)
+    fingerprint = model_fingerprint(model)
+
+    trace_path = (
+        Path(args.output)
+        if args.output
+        else Path(".umax/traces") / f"{fingerprint}-trace.jsonl"
+    )
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.unlink(missing_ok=True)
+
+    env = os.environ.copy()
+    env["UMAX_TRACE"] = str(trace_path.resolve())
+
+    print("Running UMA-X tensor trace...")
+
+    run_llama_bench(
+        llama_bench,
+        model,
+        args.prompt_tokens,
+        args.gen_tokens,
+        args.repetitions,
+        extra_args=plan.llama_args(),
+        env=env,
+    )
+
+    if not trace_path.is_file():
+        raise SystemExit(
+            "UMA-X trace file was not created. "
+            "Use a llama-bench binary built with the UMA-X trace patch."
+        )
+
+    report = analyze_trace(load_trace(trace_path))
+
+    analysis_path = trace_path.with_suffix(".analysis.json")
+    analysis_path.write_text(
+        json.dumps(report, indent=2),
+        encoding="utf-8",
+    )
+
+    profile_path = ProfileStore().record(
+        model,
+        hw,
+        {
+            "type": "trace",
+            "trace_artifact": str(trace_path.resolve()),
+            "analysis_artifact": str(analysis_path.resolve()),
+            "summary": report,
+            "planner": plan.to_dict(),
+        },
+    )
+
+    print("\nTrace")
+    print(f"  Records        {report['records']}")
+    print(f"  Backends       {report['backends']}")
+    print(f"  Weights        {report['unique_weights']}")
+    print(f"  Weight buffers {report['weight_buffers']}")
+    print(f"  Physical slots {report['physical_slots']}")
+    print(f"  Reused slots   {report['reused_slots']}")
+    print(f"  Next use       {report['next_use']}")
+    print(f"  Trace artifact {trace_path.resolve()}")
+    print(f"  Analysis       {analysis_path.resolve()}")
+    print(f"  Profile        {profile_path.resolve()}")
+
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="umax",
@@ -171,6 +249,19 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--repetitions", type=int, default=5)
     bench.add_argument("--output")
     bench.set_defaults(func=_bench)
+
+
+    trace = sub.add_parser(
+        "trace",
+        help="capture and analyze UMA-X tensor execution traces",
+    )
+    trace.add_argument("model")
+    trace.add_argument("--llama-bin-dir")
+    trace.add_argument("--prompt-tokens", type=int, default=16)
+    trace.add_argument("--gen-tokens", type=int, default=1)
+    trace.add_argument("--repetitions", type=int, default=1)
+    trace.add_argument("--output")
+    trace.set_defaults(func=_trace)
 
     return parser
 
