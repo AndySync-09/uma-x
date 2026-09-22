@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uma-x"
+version = "0.1.0a1"
+description = "Transformer-aware virtual memory and heterogeneous compute research runtime for local AI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "UMA-X contributors" }
+]
+keywords = ["llm", "llama.cpp", "local-ai", "inference", "virtual-memory", "heterogeneous-compute"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Operating System :: Microsoft :: Windows"
+]
+dependencies = []
+
+[project.scripts]
+umax = "umax.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
