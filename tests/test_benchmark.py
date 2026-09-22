@@ -1,7 +1,9 @@
 import json
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from umax.benchmark import _extract_json, metric_summary, percent_delta
+from umax.benchmark import _extract_json, metric_summary, percent_delta, run_llama_bench
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -18,6 +20,32 @@ class BenchmarkTests(unittest.TestCase):
     def test_percent_delta(self):
         self.assertEqual(percent_delta(10.0, 12.0), 20.0)
         self.assertIsNone(percent_delta(0.0, 12.0))
+
+    def test_run_llama_bench_uses_files_not_subprocess_pipes(self):
+        payload = [
+            {"n_prompt": 512, "n_gen": 0, "avg_ts": 1000.0},
+            {"n_prompt": 0, "n_gen": 128, "avg_ts": 20.0},
+        ]
+
+        def fake_run(command, **kwargs):
+            self.assertIn("stdout", kwargs)
+            self.assertIn("stderr", kwargs)
+            self.assertNotIn("capture_output", kwargs)
+            kwargs["stdout"].write(json.dumps(payload))
+            kwargs["stderr"].write("sycl diagnostic")
+            return SimpleNamespace(returncode=0)
+
+        with patch("umax.benchmark.subprocess.run", side_effect=fake_run):
+            result = run_llama_bench(
+                "llama-bench",
+                "model.gguf",
+                prompt_tokens=512,
+                gen_tokens=128,
+                repetitions=2,
+            )
+
+        self.assertEqual(result["rows"], payload)
+        self.assertEqual(result["stderr"], "sycl diagnostic")
 
 
 if __name__ == "__main__":
