@@ -82,28 +82,39 @@ def resolve_binary(name: str, bin_dir: str | None = None) -> str | None:
     return None
 
 
-def query_llama_devices(llama_bench: str | None) -> tuple[str, ...]:
-    if not llama_bench:
-        return ()
-
+def _run_probe(command: list[str]) -> tuple[int, str]:
     try:
         proc = subprocess.run(
-            [llama_bench, "--list-devices"],
+            command,
             check=False,
             capture_output=True,
             text=True,
             timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
-        return ()
+        return 1, ""
 
     combined = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
-    lines = []
-    for raw in combined.splitlines():
-        line = raw.strip()
-        if line:
-            lines.append(line)
-    return tuple(lines)
+    return proc.returncode, combined.strip()
+
+
+def query_llama_devices(llama_bench: str | None, bin_dir: str | None = None) -> tuple[str, ...]:
+    if not llama_bench:
+        return ()
+
+    code, output = _run_probe([llama_bench, "--list-devices"])
+    if code == 0 and output:
+        return tuple(line.strip() for line in output.splitlines() if line.strip())
+
+    # Older llama.cpp SYCL builds (including b5377) do not implement
+    # --list-devices on llama-bench, but ship a dedicated device probe.
+    sycl_probe = resolve_binary("llama-ls-sycl-device", bin_dir)
+    if sycl_probe:
+        code, output = _run_probe([sycl_probe])
+        if code == 0 and output:
+            return tuple(line.strip() for line in output.splitlines() if line.strip())
+
+    return ()
 
 
 def snapshot(bin_dir: str | None = None) -> HardwareSnapshot:
@@ -115,7 +126,7 @@ def snapshot(bin_dir: str | None = None) -> HardwareSnapshot:
         processor=platform.processor(),
         logical_cpus=os.cpu_count() or 1,
         total_ram_bytes=total_memory_bytes(),
-        llama_devices=query_llama_devices(bench),
+        llama_devices=query_llama_devices(bench, bin_dir),
     )
 
 

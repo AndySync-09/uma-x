@@ -9,7 +9,6 @@ from .hardware import HardwareSnapshot, has_accelerator
 class ExecutionPlan:
     threads: int
     gpu_layers: int
-    flash_attention: str
     mmap: bool
     rationale: tuple[str, ...]
 
@@ -19,11 +18,9 @@ class ExecutionPlan:
             str(self.threads),
             "-ngl",
             str(self.gpu_layers),
-            "-fa",
-            self.flash_attention,
         ]
         if not self.mmap:
-            args.append("--no-mmap")
+            args.extend(["-mmp", "0"])
         return args
 
     def to_dict(self) -> dict:
@@ -34,15 +31,15 @@ class ExecutionPlan:
 
 def choose_plan(hw: HardwareSnapshot, model_size_bytes: int) -> ExecutionPlan:
     logical = max(1, hw.logical_cpus)
-    # Conservative bootstrap heuristic. This is intentionally simple until
-    # benchmark evidence replaces it with machine-specific learned policy.
-    threads = max(1, min(16, logical // 2 if logical > 2 else logical))
+    # Conservative bootstrap heuristic. Keep v0.1 close to llama.cpp defaults
+    # so the first A/B validates the control path rather than claiming tuning.
+    threads = max(1, min(16, logical))
 
     accelerator = has_accelerator(hw.llama_devices)
-    gpu_layers = -1 if accelerator else 0
+    gpu_layers = 99 if accelerator else 0
 
     rationale = [
-        f"threads={threads} from {logical} logical CPUs",
+        f"threads={threads} from {logical} logical CPUs; v0.1 caps at llama-bench's 16-thread control default",
         "mmap enabled so the OS can provide the initial file-backed model path",
     ]
     if accelerator:
@@ -58,7 +55,6 @@ def choose_plan(hw: HardwareSnapshot, model_size_bytes: int) -> ExecutionPlan:
     return ExecutionPlan(
         threads=threads,
         gpu_layers=gpu_layers,
-        flash_attention="auto",
         mmap=True,
         rationale=tuple(rationale),
     )
