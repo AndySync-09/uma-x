@@ -33,13 +33,13 @@ def choose_plan(hw: HardwareSnapshot, model_size_bytes: int) -> ExecutionPlan:
     logical = max(1, hw.logical_cpus)
     # Conservative bootstrap heuristic. Keep v0.1 close to llama.cpp defaults
     # so the first A/B validates the control path rather than claiming tuning.
-    threads = max(1, min(16, logical // 2 if logical > 2 else logical))
+    threads = max(1, min(16, logical))
 
     accelerator = has_accelerator(hw.llama_devices)
     gpu_layers = 99 if accelerator else 0
 
     rationale = [
-        f"threads={threads} from {logical} logical CPUs",
+        f"threads={threads} from {logical} logical CPUs; v0.1 caps at llama-bench's 16-thread control default",
         "mmap enabled so the OS can provide the initial file-backed model path",
     ]
     if accelerator:
