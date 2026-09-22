@@ -16,23 +16,30 @@ class BenchmarkError(RuntimeError):
 _WINDOWS_ACCESS_VIOLATION_CODES = {3221225477, -1073741819}
 
 
-def _extract_json(stdout: str) -> list[dict[str, Any]]:
-    text = stdout.strip()
-    if not text:
-        raise BenchmarkError("llama-bench produced no JSON output")
+def _extract_jsonl(stdout: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
 
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("[")
-        end = text.rfind("]")
-        if start < 0 or end <= start:
-            raise BenchmarkError("could not locate llama-bench JSON output")
-        parsed = json.loads(text[start : end + 1])
+    for line_number, raw_line in enumerate(stdout.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise BenchmarkError(
+                f"invalid llama-bench JSONL on line {line_number}: {exc.msg}"
+            ) from exc
 
-    if not isinstance(parsed, list):
-        raise BenchmarkError("unexpected llama-bench JSON shape")
-    return parsed
+        if not isinstance(parsed, dict):
+            raise BenchmarkError(
+                f"unexpected llama-bench JSONL row shape on line {line_number}"
+            )
+        rows.append(parsed)
+
+    if not rows:
+        raise BenchmarkError("llama-bench produced no JSONL output")
+
+    return rows
 
 
 def _has_complete_benchmark_rows(
@@ -73,17 +80,18 @@ def run_llama_bench(
         "-r",
         str(repetitions),
         "-o",
-        "json",
+        "jsonl",
     ]
     if extra_args:
         command.extend(extra_args)
 
-    # Do not capture llama-bench through Python pipes. Some Windows SYCL
-    # runtimes crash when stdout/stderr are attached to subprocess.PIPE.
-    # Plain shell redirection is stable, so mirror that behavior with
-    # temporary files and parse the files after the process exits.
+    # Keep stdout/stderr off Python pipes. On some Intel Arc/SYCL Windows
+    # setups llama-bench can exit with 0xC0000005 during backend teardown.
+    # JSONL is intentionally used because each completed benchmark row is
+    # flushed independently, so valid measurements survive a late teardown
+    # crash even when a buffered JSON array would be truncated.
     with tempfile.TemporaryDirectory(prefix="umax-bench-") as temp_dir:
-        stdout_path = Path(temp_dir) / "stdout.json"
+        stdout_path = Path(temp_dir) / "stdout.jsonl"
         stderr_path = Path(temp_dir) / "stderr.txt"
 
         with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_file, \
@@ -102,7 +110,7 @@ def run_llama_bench(
     rows: list[dict[str, Any]] | None = None
     parse_error: BenchmarkError | None = None
     try:
-        rows = _extract_json(stdout)
+        rows = _extract_jsonl(stdout)
     except BenchmarkError as exc:
         parse_error = exc
 
@@ -116,7 +124,7 @@ def run_llama_bench(
     if proc.returncode != 0 and not tolerated_teardown:
         detail = stderr.strip()
         if parse_error is not None:
-            detail = f"{detail}\nJSON: {parse_error}".strip()
+            detail = f"{detail}\nJSONL: {parse_error}".strip()
         raise BenchmarkError(
             f"llama-bench failed with exit code {proc.returncode}\n{detail}"
         )
@@ -128,7 +136,7 @@ def run_llama_bench(
     teardown_warning = None
     if tolerated_teardown:
         teardown_warning = (
-            "llama-bench completed and emitted valid benchmark JSON, then the "
+            "llama-bench completed and emitted complete benchmark JSONL, then the "
             "Windows SYCL runtime exited with access violation 0xC0000005 during teardown"
         )
 
