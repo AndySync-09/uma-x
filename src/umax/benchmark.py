@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 from typing import Any
 
 
@@ -54,22 +55,36 @@ def run_llama_bench(
     if extra_args:
         command.extend(extra_args)
 
-    proc = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    # Do not capture llama-bench through Python pipes. Some Windows SYCL
+    # runtimes crash when stdout/stderr are attached to subprocess.PIPE.
+    # Plain shell redirection is stable, so mirror that behavior with
+    # temporary files and parse the files after the process exits.
+    with tempfile.TemporaryDirectory(prefix="umax-bench-") as temp_dir:
+        stdout_path = Path(temp_dir) / "stdout.json"
+        stderr_path = Path(temp_dir) / "stderr.txt"
+
+        with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_file, \
+             stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_file:
+            proc = subprocess.run(
+                command,
+                check=False,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+            )
+
+        stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
 
     if proc.returncode != 0:
         raise BenchmarkError(
-            f"llama-bench failed with exit code {proc.returncode}\n{proc.stderr.strip()}"
+            f"llama-bench failed with exit code {proc.returncode}\n{stderr.strip()}"
         )
 
     return {
         "command": command,
-        "rows": _extract_json(proc.stdout),
-        "stderr": proc.stderr.strip(),
+        "rows": _extract_json(stdout),
+        "stderr": stderr.strip(),
     }
 
 
